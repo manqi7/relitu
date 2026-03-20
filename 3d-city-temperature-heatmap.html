@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D 城市气温热力图</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+        }
+
+        #container {
+            width: 100vw;
+            height: 100vh;
+            position: relative;
+        }
+
+        /* 标题样式 */
+        #title {
+            position: absolute;
+            top: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            color: #fff;
+            font-size: 24px;
+            font-weight: bold;
+            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.5);
+            z-index: 100;
+            pointer-events: none;
+        }
+
+        /* 图例样式 */
+        #legend {
+            position: absolute;
+            bottom: 30px;
+            right: 30px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px 20px;
+            border-radius: 10px;
+            color: #fff;
+            z-index: 100;
+            backdrop-filter: blur(5px);
+        }
+
+        #legend h3 {
+            margin-bottom: 10px;
+            font-size: 14px;
+            color: #ccc;
+        }
+
+        .legend-gradient {
+            width: 200px;
+            height: 20px;
+            background: linear-gradient(to right, #0066ff, #00ff66, #ffff00, #ff6600, #ff0000);
+            border-radius: 5px;
+            margin-bottom: 5px;
+        }
+
+        .legend-labels {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        /* Tooltip 样式 */
+        #tooltip {
+            position: absolute;
+            background: rgba(0, 0, 0, 0.85);
+            color: #fff;
+            padding: 12px 16px;
+            border-radius: 8px;
+            font-size: 14px;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            z-index: 200;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            backdrop-filter: blur(5px);
+        }
+
+        #tooltip.visible {
+            opacity: 1;
+        }
+
+        #tooltip .zone-name {
+            font-weight: bold;
+            color: #4fc3f7;
+            margin-bottom: 5px;
+        }
+
+        #tooltip .temperature {
+            font-size: 18px;
+            font-weight: bold;
+        }
+
+        /* 控制提示 */
+        #controls {
+            position: absolute;
+            bottom: 30px;
+            left: 30px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 15px 20px;
+            border-radius: 10px;
+            color: #fff;
+            z-index: 100;
+            font-size: 12px;
+            line-height: 1.8;
+            backdrop-filter: blur(5px);
+        }
+
+        #controls h3 {
+            margin-bottom: 8px;
+            font-size: 14px;
+            color: #ccc;
+        }
+
+        #controls span {
+            color: #4fc3f7;
+        }
+
+        /* 加载提示 */
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #fff;
+            font-size: 18px;
+            z-index: 300;
+        }
+    </style>
+</head>
+<body>
+    <div id="container">
+        <div id="title">🏙️ 3D 城市气温热力图</div>
+        <div id="loading">加载中...</div>
+        
+        <div id="legend">
+            <h3>温度图例 (°C)</h3>
+            <div class="legend-gradient"></div>
+            <div class="legend-labels">
+                <span>20°C</span>
+                <span>25°C</span>
+                <span>30°C</span>
+                <span>35°C</span>
+                <span>40°C</span>
+            </div>
+        </div>
+
+        <div id="controls">
+            <h3>操作说明</h3>
+            <div><span>🖱️ 左键拖拽</span> - 旋转视角</div>
+            <div><span>🖱️ 右键拖拽</span> - 平移视角</div>
+            <div><span>🖱️ 滚轮</span> - 缩放</div>
+            <div><span>👆 悬停</span> - 查看温度</div>
+            <div><span>🖱️ 点击</span> - 聚焦区域</div>
+        </div>
+
+        <div id="tooltip">
+            <div class="zone-name"></div>
+            <div class="temperature"></div>
+        </div>
+    </div>
+
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- OrbitControls -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+
+    <script>
+        // ============================================
+        // 3D 城市气温热力图 - 主程序
+        // ============================================
+
+        // 全局变量
+        let scene, camera, renderer, controls;
+        let raycaster, mouse;
+        let cityGrid = []; // 存储所有柱体数据
+        let hoveredObject = null;
+        let originalColor = new THREE.Color();
+        
+        // 配置参数
+        const CONFIG = {
+            gridSize: 12,        // 网格大小 (12x12)
+            cellSize: 3,         // 每个单元格的大小
+            cellGap: 0.5,        // 单元格间距
+            minTemp: 20,         // 最低温度
+            maxTemp: 40,         // 最高温度
+            minHeight: 2,        // 最低柱体高度
+            maxHeight: 15,       // 最高柱体高度
+            baseColor: 0x1a1a2e  // 地面颜色
+        };
+
+        // 初始化场景
+        function init() {
+            const container = document.getElementById('container');
+
+            // 1. 创建场景
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0a0a1a);
+            scene.fog = new THREE.Fog(0x0a0a1a, 50, 150);
+
+            // 2. 创建相机
+            const aspect = window.innerWidth / window.innerHeight;
+            camera = new THREE.PerspectiveCamera(45, aspect, 0.1, 1000);
+            camera.position.set(60, 50, 60);
+
+            // 3. 创建渲染器
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            // 4. 创建控制器
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+            controls.minDistance = 20;
+            controls.maxDistance = 150;
+            controls.maxPolarAngle = Math.PI / 2 - 0.1; // 防止相机进入地面以下
+
+            // 5. 添加灯光
+            setupLighting();
+
+            // 6. 创建地面
+            createGround();
+
+            // 7. 生成城市网格数据并创建柱体
+            generateCityData();
+
+            // 8. 初始化射线检测
+            raycaster = new THREE.Raycaster();
+            mouse = new THREE.Vector2();
+
+            // 9. 添加事件监听
+            window.addEventListener('resize', onWindowResize);
+            renderer.domElement.addEventListener('mousemove', onMouseMove);
+            renderer.domElement.addEventListener('click', onClick);
+
+            // 隐藏加载提示
+            document.getElementById('loading').style.display = 'none';
+
+            // 10. 开始动画循环
+            animate();
+        }
+
+        // 设置灯光
+        function setupLighting() {
+            // 环境光
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+
+            // 平行光（主光源，产生阴影）
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(50, 80, 30);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            directionalLight.shadow.camera.near = 0.5;
+            directionalLight.shadow.camera.far = 200;
+            directionalLight.shadow.camera.left = -50;
+            directionalLight.shadow.camera.right = 50;
+            directionalLight.shadow.camera.top = 50;
+            directionalLight.shadow.camera.bottom = -50;
+            scene.add(directionalLight);
+
+            // 补光
+            const fillLight = new THREE.DirectionalLight(0x6688ff, 0.3);
+            fillLight.position.set(-30, 40, -30);
+            scene.add(fillLight);
+        }
+
+        // 创建地面
+        function createGround() {
+            const gridExtent = CONFIG.gridSize * (CONFIG.cellSize + CONFIG.cellGap);
+            const geometry = new THREE.PlaneGeometry(gridExtent + 20, gridExtent + 20);
+            const material = new THREE.MeshStandardMaterial({
+                color: 0x1a1a2e,
+                roughness: 0.8,
+                metalness: 0.2
+            });
+            const ground = new THREE.Mesh(geometry, material);
+            ground.rotation.x = -Math.PI / 2;
+            ground.position.y = -0.1;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // 添加网格辅助线
+            const gridHelper = new THREE.GridHelper(gridExtent + 10, 20, 0x444466, 0x222233);
+            gridHelper.position.y = 0.01;
+            scene.add(gridHelper);
+        }
+
+        // 生成城市网格数据
+        function generateCityData() {
+            const offset = (CONFIG.gridSize - 1) * (CONFIG.cellSize + CONFIG.cellGap) / 2;
+
+            for (let x = 0; x < CONFIG.gridSize; x++) {
+                for (let z = 0; z < CONFIG.gridSize; z++) {
+                    // 生成随机温度 (20-40°C)
+                    const temperature = CONFIG.minTemp + Math.random() * (CONFIG.maxTemp - CONFIG.minTemp);
+                    
+                    // 计算柱体高度（与温度成正比）
+                    const heightRatio = (temperature - CONFIG.minTemp) / (CONFIG.maxTemp - CONFIG.minTemp);
+                    const height = CONFIG.minHeight + heightRatio * (CONFIG.maxHeight - CONFIG.minHeight);
+
+                    // 计算颜色（温度映射）
+                    const color = getTemperatureColor(temperature);
+
+                    // 创建柱体
+                    const geometry = new THREE.BoxGeometry(CONFIG.cellSize, height, CONFIG.cellSize);
+                    
+                    // 调整几何体中心点，使柱体从底部生长
+                    geometry.translate(0, height / 2, 0);
+
+                    const material = new THREE.MeshStandardMaterial({
+                        color: color,
+                        roughness: 0.4,
+                        metalness: 0.3,
+                        emissive: color,
+                        emissiveIntensity: 0.1
+                    });
+
+                    const mesh = new THREE.Mesh(geometry, material);
+                    
+                    // 设置位置
+                    const posX = x * (CONFIG.cellSize + CONFIG.cellGap) - offset;
+                    const posZ = z * (CONFIG.cellSize + CONFIG.cellGap) - offset;
+                    mesh.position.set(posX, 0, posZ);
+
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
+
+                    // 存储数据到 mesh 的 userData 中
+                    mesh.userData = {
+                        gridX: x,
+                        gridZ: z,
+                        zoneName: `${String.fromCharCode(65 + x)}-${z + 1}`,
+                        temperature: temperature,
+                        originalColor: color.clone(),
+                        originalScale: mesh.scale.clone()
+                    };
+
+                    scene.add(mesh);
+                    cityGrid.push(mesh);
+                }
+            }
+        }
+
+        // 温度到颜色的映射函数（线性插值）
+        function getTemperatureColor(temperature) {
+            const ratio = (temperature - CONFIG.minTemp) / (CONFIG.maxTemp - CONFIG.minTemp);
+            const color = new THREE.Color();
+
+            if (ratio < 0.25) {
+                // 蓝色 -> 青色
+                const t = ratio / 0.25;
+                color.lerpColors(new THREE.Color(0x0066ff), new THREE.Color(0x00ffaa), t);
+            } else if (ratio < 0.5) {
+                // 青色 -> 绿色/黄色
+                const t = (ratio - 0.25) / 0.25;
+                color.lerpColors(new THREE.Color(0x00ffaa), new THREE.Color(0xaaff00), t);
+            } else if (ratio < 0.75) {
+                // 绿色/黄色 -> 橙色
+                const t = (ratio - 0.5) / 0.25;
+                color.lerpColors(new THREE.Color(0xaaff00), new THREE.Color(0xffaa00), t);
+            } else {
+                // 橙色 -> 红色
+                const t = (ratio - 0.75) / 0.25;
+                color.lerpColors(new THREE.Color(0xffaa00), new THREE.Color(0xff2200), t);
+            }
+
+            return color;
+        }
+
+        // 鼠标移动事件处理
+        function onMouseMove(event) {
+            // 计算鼠标在归一化设备坐标中的位置
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+            // 更新射线
+            raycaster.setFromCamera(mouse, camera);
+
+            // 检测与柱体的交集
+            const intersects = raycaster.intersectObjects(cityGrid);
+
+            // 处理悬停状态
+            if (intersects.length > 0) {
+                const object = intersects[0].object;
+
+                if (hoveredObject !== object) {
+                    // 恢复之前悬停对象的状态
+                    if (hoveredObject) {
+                        resetObjectState(hoveredObject);
+                    }
+
+                    // 高亮新对象
+                    hoveredObject = object;
+                    highlightObject(hoveredObject);
+
+                    // 显示 Tooltip
+                    showTooltip(event, object.userData);
+                } else {
+                    // 更新 Tooltip 位置
+                    updateTooltipPosition(event);
+                }
+            } else {
+                if (hoveredObject) {
+                    resetObjectState(hoveredObject);
+                    hoveredObject = null;
+                    hideTooltip();
+                }
+            }
+        }
+
+        // 点击事件处理
+        function onClick(event) {
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(cityGrid);
+
+            if (intersects.length > 0) {
+                const object = intersects[0].object;
+                const data = object.userData;
+
+                // 控制台打印详细数据
+                console.log('=================================');
+                console.log('📍 区域信息:');
+                console.log(`   区域名称: ${data.zoneName}`);
+                console.log(`   网格坐标: (${data.gridX}, ${data.gridZ})`);
+                console.log(`   温度: ${data.temperature.toFixed(2)}°C`);
+                console.log(`   世界坐标: (${object.position.x.toFixed(2)}, ${object.position.y.toFixed(2)}, ${object.position.z.toFixed(2)})`);
+                console.log('=================================');
+
+                // 相机平滑聚焦到该柱体
+                focusCameraOnObject(object);
+            }
+        }
+
+        // 高亮对象
+        function highlightObject(object) {
+            // 增加自发光强度
+            object.material.emissiveIntensity = 0.5;
+            
+            // 稍微放大
+            object.scale.set(1.1, 1, 1.1);
+            
+            // 改变光标样式
+            document.body.style.cursor = 'pointer';
+        }
+
+        // 恢复对象状态
+        function resetObjectState(object) {
+            object.material.emissiveIntensity = 0.1;
+            object.scale.copy(object.userData.originalScale);
+            document.body.style.cursor = 'default';
+        }
+
+        // 显示 Tooltip
+        function showTooltip(event, data) {
+            const tooltip = document.getElementById('tooltip');
+            const zoneNameEl = tooltip.querySelector('.zone-name');
+            const tempEl = tooltip.querySelector('.temperature');
+
+            zoneNameEl.textContent = `区域 ${data.zoneName}`;
+            tempEl.textContent = `${data.temperature.toFixed(1)}°C`;
+            
+            // 根据温度设置文字颜色
+            const tempColor = getTemperatureColor(data.temperature);
+            tempEl.style.color = `#${tempColor.getHexString()}`;
+
+            tooltip.classList.add('visible');
+            updateTooltipPosition(event);
+        }
+
+        // 更新 Tooltip 位置
+        function updateTooltipPosition(event) {
+            const tooltip = document.getElementById('tooltip');
+            const x = event.clientX + 15;
+            const y = event.clientY - 15;
+            
+            // 防止 Tooltip 超出屏幕
+            const rect = tooltip.getBoundingClientRect();
+            let finalX = x;
+            let finalY = y;
+            
+            if (x + rect.width > window.innerWidth) {
+                finalX = event.clientX - rect.width - 15;
+            }
+            if (y + rect.height > window.innerHeight) {
+                finalY = event.clientY - rect.height - 15;
+            }
+            
+            tooltip.style.left = `${finalX}px`;
+            tooltip.style.top = `${finalY}px`;
+        }
+
+        // 隐藏 Tooltip
+        function hideTooltip() {
+            const tooltip = document.getElementById('tooltip');
+            tooltip.classList.remove('visible');
+        }
+
+        // 相机聚焦到对象
+        function focusCameraOnObject(object) {
+            const targetPosition = new THREE.Vector3(
+                object.position.x,
+                object.position.y + 10,
+                object.position.z + 20
+            );
+
+            // 使用简单的插值动画
+            const startPosition = camera.position.clone();
+            const startTarget = controls.target.clone();
+            const endTarget = object.position.clone();
+            
+            let progress = 0;
+            const duration = 60; // 帧数
+            
+            function animateFocus() {
+                progress++;
+                const t = progress / duration;
+                const easeT = 1 - Math.pow(1 - t, 3); // easeOutCubic
+
+                camera.position.lerpVectors(startPosition, targetPosition, easeT);
+                controls.target.lerpVectors(startTarget, endTarget, easeT);
+                controls.update();
+
+                if (progress < duration) {
+                    requestAnimationFrame(animateFocus);
+                }
+            }
+            
+            animateFocus();
+        }
+
+        // 窗口大小改变处理
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        // 动画循环
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        // 启动应用
+        init();
+    </script>
+</body>
+</html>
